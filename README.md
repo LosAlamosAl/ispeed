@@ -325,7 +325,22 @@ aws logs tail /aws/lambda/TextAppendSecurityStack-GuardLambda* --follow
 ## Key Design Decisions
 
 ### Reserved Concurrency = 1
-The App Lambda has a reserved concurrency of 1 to prevent race conditions during the read-modify-write operation on the S3 object. This ensures data consistency but limits throughput to sequential requests.
+
+**⚠️ TEMPORARY WORKAROUND ACTIVE:**
+Reserved concurrency is currently **disabled** due to AWS account concurrency limits. This is commented out in `lib/text-append-app-stack.js` line 35.
+
+**IMPORTANT:** Without reserved concurrency:
+- **Race conditions are possible** if multiple clients append simultaneously
+- **Data corruption can occur** during concurrent writes
+- **Only use for single-user testing** until AWS concurrency limit increase is approved
+- **DO NOT deploy to production** without restoring `reservedConcurrentExecutions: 1`
+
+**To restore (after limit increase):**
+1. Request AWS Lambda concurrency limit increase to at least 1000 (see Troubleshooting section)
+2. Uncomment line 35 in `lib/text-append-app-stack.js`
+3. Redeploy: `cdk deploy TextAppendAppStack`
+
+**Original design:** The App Lambda should have a reserved concurrency of 1 to prevent race conditions during the read-modify-write operation on the S3 object. This ensures data consistency but limits throughput to sequential requests.
 
 ### Plain Text Body
 The PUT /append endpoint accepts plain text in the request body (not JSON). The entire body is appended as-is with a newline.
@@ -352,6 +367,42 @@ To avoid circular dependencies between stacks, the S3 event notification is conf
 ```bash
 echo "" | aws s3 cp - s3://${S3_BUCKET_NAME}/${S3_OBJECT_KEY}
 ```
+
+### Problem: ReservedConcurrentExecutions Error During Deployment
+
+**Error:** `Resource handler returned message: "Specified ReservedConcurrentExecutions for function decreases account's UnreservedConcurrentExecution below its minimum value of [10]"`
+
+**Cause:** Your AWS account has insufficient Lambda concurrency quota. AWS requires at least 10 unreserved concurrent executions.
+
+**Check your limits:**
+```bash
+aws lambda get-account-settings
+# Look at: ConcurrentExecutions (should be 1000, not 10)
+```
+
+**Solution:** Request AWS Lambda concurrency limit increase:
+
+1. **Via Service Quotas Console:**
+   - Go to [AWS Service Quotas Console](https://console.aws.amazon.com/servicequotas/)
+   - Search for "Lambda"
+   - Select "AWS Lambda"
+   - Find "Concurrent executions"
+   - Request increase to **1000**
+
+2. **Via AWS CLI:**
+   ```bash
+   aws service-quotas request-service-quota-increase \
+     --service-code lambda \
+     --quota-code L-B99A9384 \
+     --desired-value 1000 \
+     --region us-east-1
+   ```
+
+3. **Temporary workaround (testing only):**
+   - Reserved concurrency is currently disabled in the code (see "Reserved Concurrency = 1" section)
+   - **WARNING:** This removes race condition protection
+   - Deploy will succeed but concurrent writes may corrupt data
+   - After limit increase approved, restore `reservedConcurrentExecutions: 1` in `lib/text-append-app-stack.js`
 
 ### Problem: Lambda "Access Denied" on S3
 
