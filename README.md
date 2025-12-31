@@ -18,6 +18,7 @@ A serverless public API that appends text to a single S3 object, featuring a cir
 - Monitors write frequency via S3 metadata timestamps
 - Circuit breaker: Deletes the API Gateway stage if writes occur within 30 minutes
 - Requires manual recovery via AWS CLI
+- **Custom Resource:** Uses a Custom Resource Lambda to configure S3 event notifications without creating circular dependencies between stacks
 
 ## Prerequisites
 
@@ -315,8 +316,10 @@ aws logs tail /aws/lambda/TextAppendSecurityStack-GuardLambda* --follow
 └── lambda/
     ├── app-handler/
     │   └── index.mjs                       # App Lambda (PUT /append, GET /read)
-    └── guard-handler/
-        └── index.mjs                       # Guard Lambda (circuit breaker)
+    ├── guard-handler/
+    │   └── index.mjs                       # Guard Lambda (circuit breaker)
+    └── s3-notification-config/
+        └── index.mjs                       # Custom Resource Lambda (S3 notification config)
 ```
 
 ## Key Design Decisions
@@ -335,6 +338,9 @@ The security mechanism uses a destructive action (deleting the API stage) to ens
 
 ### Cross-Stack References
 The Security Stack receives the S3 bucket and HTTP API objects from the App Stack via constructor props. CDK automatically generates CloudFormation exports/imports.
+
+### Custom Resource for S3 Notifications
+To avoid circular dependencies between stacks, the S3 event notification is configured using a CloudFormation Custom Resource. The Security Stack includes a Custom Resource Lambda (`lambda/s3-notification-config`) that uses the AWS SDK to configure S3 bucket notifications at deployment time. This approach allows the Security Stack to configure the App Stack's S3 bucket without directly modifying it in CloudFormation, preventing the circular dependency that would occur with the standard `addEventNotification()` method.
 
 ## Troubleshooting
 
