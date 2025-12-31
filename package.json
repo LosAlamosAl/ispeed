@@ -1,0 +1,23 @@
+{
+  "name": "ispeed",
+  "version": "0.1.0",
+  "bin": {
+    "ispeed": "bin/ispeed.js"
+  },
+  "scripts": {
+    "build": "echo \"The build step is not required when using JavaScript!\" && exit 0",
+    "cdk": "cdk",
+    "test": "jest"
+  },
+  "devDependencies": {
+    "aws-cdk": "2.1100.1",
+    "jest": "^29.7.0"
+  },
+  "dependencies": {
+    "@aws-sdk/client-apigatewayv2": "^3.958.0",
+    "@aws-sdk/client-s3": "^3.958.0",
+    "aws-cdk-lib": "2.232.1",
+    "constructs": "^10.0.0",
+    "dotenv": "^17.2.3"
+  }
+}

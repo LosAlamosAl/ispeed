@@ -1,0 +1,14 @@
+# Local Environment Secrets
+.env
+.env.local
+.env.*.local
+
+# OS Specific
+.DS_Store
+Thumbs.db
+
+node_modules
+
+# CDK asset staging directory
+.cdk.staging
+cdk.out
