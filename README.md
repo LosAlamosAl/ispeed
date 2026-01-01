@@ -73,24 +73,6 @@ Or use the default account/region:
 cdk bootstrap
 ```
 
-### 5. Create the Initial S3 Object
-
-The application expects the S3 object to exist before making requests. Create it manually:
-
-```bash
-# Create empty initial file
-echo "" > /tmp/initial.txt
-
-# Upload to S3 (replace with your bucket/key from .env)
-aws s3 cp /tmp/initial.txt s3://${S3_BUCKET_NAME}/${S3_OBJECT_KEY}
-```
-
-Alternatively, create with some initial content:
-
-```bash
-echo "Initial content" | aws s3 cp - s3://${S3_BUCKET_NAME}/${S3_OBJECT_KEY}
-```
-
 ## Deployment
 
 ### Phase 1: Deploy App Stack Only (Recommended)
@@ -109,13 +91,46 @@ TextAppendAppStack.HttpApiUrl = https://[api-id].execute-api.[region].amazonaws.
 TextAppendAppStack.HttpApiId = [api-id]
 ```
 
-Export the URL for convenience:
+### Create the Initial S3 Object
+
+**Important:** The S3 bucket now exists. Before testing the API, create the initial object:
+
+```bash
+# Create empty initial file
+echo "" > /tmp/initial.txt
+
+# Upload to S3(using bucket/key from your .env file)
+aws s3 cp /tmp/initial.txt s3://${S3_BUCKET_NAME}/${S3_OBJECT_KEY}
+```
+
+Alternatively, create with some initial content:
+
+```bash
+echo "Initial content" | aws s3 cp - s3://${S3_BUCKET_NAME}/${S3_OBJECT_KEY}
+```
+
+### Test the Endpoints
+
+Export the API URL for convenience:
 
 ```bash
 export API_URL=$(aws cloudformation describe-stacks \
   --stack-name TextAppendAppStack \
   --query 'Stacks[0].Outputs[?OutputKey==`HttpApiUrl`].OutputValue' \
   --output text)
+```
+
+Test the endpoints:
+
+```bash
+# Test READ
+curl "${API_URL}read"
+
+# Test APPEND
+curl -X PUT "${API_URL}append" -H "Content-Type: text/plain" -d "Hello World"
+
+# Verify append worked
+curl "${API_URL}read"
 ```
 
 ### Phase 2: Deploy Security Stack (After Testing)
