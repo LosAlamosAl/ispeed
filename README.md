@@ -1,24 +1,26 @@
 # Serverless Text-Append Service
 
-A serverless public API that appends text to a single S3 object, featuring a circuit breaker security mechanism. The system is split into two AWS CDK stacks to allow the core application to be tested before deploying the security layer.
+A serverless public API that appends text to a single S3 object, featuring an integrated circuit breaker security mechanism. The system uses a single AWS CDK stack with a Lambda function that handles both text operations and circuit breaker logic.
 
 ## Architecture Overview
 
-### Two-Stack Design
+### Single-Stack Design
 
-**TextAppendAppStack (The "App")**
-- S3 Bucket for storing the text file
-- Lambda function with reserved concurrency (1) to prevent race conditions
+**TextAppendAppStack**
+- S3 Bucket for storing the text file (with versioning enabled)
+- Lambda function with:
+  - Reserved concurrency (1) to prevent race conditions
+  - Integrated circuit breaker logic that monitors write frequency
+  - Permission to delete API Gateway stage if writes are too frequent
 - HTTP API Gateway (v2) with two endpoints:
-  - `PUT /append` - Append text to the S3 object
+  - `PUT /append` - Append text to the S3 object (with circuit breaker check)
   - `GET /read` - Read the current content of the S3 object
 
-**TextAppendSecurityStack (The "Guard")**
-- Guard Lambda triggered by S3 object creation events
-- Monitors write frequency via S3 metadata timestamps
-- Circuit breaker: Deletes the API Gateway stage if writes occur within 30 minutes
-- Requires manual recovery via AWS CLI
-- **Custom Resource:** Uses a Custom Resource Lambda to configure S3 event notifications without creating circular dependencies between stacks
+**Circuit Breaker:**
+- Before each append operation, the Lambda checks the S3 object's `LastModified` timestamp
+- If the last write occurred within 30 minutes, the circuit breaker activates
+- The Lambda deletes the API Gateway stage, making the API unavailable
+- Manual recovery is required via AWS CLI
 
 ## Prerequisites
 
@@ -75,9 +77,9 @@ cdk bootstrap
 
 ## Deployment
 
-### Phase 1: Deploy App Stack Only (Recommended)
+### Deploy the Stack
 
-Deploy the core application first to test functionality:
+Deploy the application stack:
 
 ```bash
 cdk deploy TextAppendAppStack
@@ -93,7 +95,7 @@ TextAppendAppStack.HttpApiId = [api-id]
 
 ### Create the Initial S3 Object
 
-**Important:** The S3 bucket now exists. Before testing the API, create the initial object:
+**Important:** Before testing the API, create the initial S3 object:
 
 ```bash
 # Create empty initial file
@@ -131,20 +133,6 @@ curl -X PUT "${API_URL}append" -H "Content-Type: text/plain" -d "Hello World"
 
 # Verify append worked
 curl "${API_URL}read"
-```
-
-### Phase 2: Deploy Security Stack (After Testing)
-
-Once you've verified the app works correctly, deploy the security stack:
-
-```bash
-cdk deploy TextAppendSecurityStack
-```
-
-### Deploy Both Stacks Together
-
-```bash
-cdk deploy --all
 ```
 
 ## API Usage
@@ -199,24 +187,27 @@ Hello World
 
 ## Circuit Breaker Behavior
 
-The Guard Lambda monitors write timestamps in S3 metadata. If two writes occur within 30 minutes:
+The App Lambda monitors the S3 object's LastModified timestamp. If writes occur too frequently:
 
-1. The Guard Lambda detects the rapid write via S3 event notification
-2. It checks the `x-amz-meta-last-write` metadata timestamp
-3. If `(Current Time - Last Write) < 30 minutes`, the circuit breaker activates
-4. The API Gateway `$default` stage is **deleted**, making the API unavailable
-5. Manual recovery is required (see below)
+1. Client attempts to append text via `PUT /append`
+2. App Lambda checks the S3 object's `LastModified` timestamp (from AWS S3, not metadata)
+3. If `(Current Time - LastModified) < 30 minutes`, the circuit breaker activates
+4. The App Lambda deletes the API Gateway `$default` stage
+5. The Lambda returns a 503 error: "Circuit breaker activated"
+6. The API becomes **unavailable** immediately
+7. Manual recovery is required (see below)
 
 **Testing the Circuit Breaker:**
 
 ```bash
-# First append
+# First append (should succeed)
 curl -X PUT "${API_URL}append" -d "First write"
 
 # Second append (within 30 minutes) - triggers circuit breaker
 curl -X PUT "${API_URL}append" -d "Second write"
+# Expected: 503 error "Circuit breaker activated..."
 
-# API should become unavailable within seconds
+# API should become unavailable immediately
 curl "${API_URL}read"
 # Expected: Connection refused or 404 Not Found
 ```
@@ -279,26 +270,18 @@ aws lambda get-function-configuration --function-name $APP_LAMBDA
 # Look for: "ReservedConcurrentExecutions": 1
 ```
 
-### Verify S3 Event Notification
-
-```bash
-aws s3api get-bucket-notification-configuration --bucket ${S3_BUCKET_NAME}
-```
-
-### Check S3 Metadata After Append
+### Check S3 LastModified Timestamp
 
 ```bash
 aws s3api head-object \
   --bucket ${S3_BUCKET_NAME} \
   --key ${S3_OBJECT_KEY} \
-  --query 'Metadata'
+  --query 'LastModified'
 ```
 
-Expected output:
-```json
-{
-    "last-write": "2025-12-31T22:00:00.123Z"
-}
+Expected output: An ISO 8601 timestamp
+```
+2026-01-05T12:34:56.000Z
 ```
 
 ### View Lambda Logs
@@ -306,11 +289,6 @@ Expected output:
 **App Lambda:**
 ```bash
 aws logs tail /aws/lambda/TextAppendAppStack-AppLambda* --follow
-```
-
-**Guard Lambda:**
-```bash
-aws logs tail /aws/lambda/TextAppendSecurityStack-GuardLambda* --follow
 ```
 
 ## Project Structure
@@ -326,15 +304,10 @@ aws logs tail /aws/lambda/TextAppendSecurityStack-GuardLambda* --follow
 ├── bin/
 │   └── ispeed.js                          # CDK app entry point
 ├── lib/
-│   ├── text-append-app-stack.js           # App stack (S3, Lambda, API Gateway)
-│   └── text-append-security-stack.js      # Security stack (Guard Lambda, S3 events)
+│   └── text-append-app-stack.js           # App stack (S3, Lambda, API Gateway)
 └── lambda/
-    ├── app-handler/
-    │   └── index.mjs                       # App Lambda (PUT /append, GET /read)
-    ├── guard-handler/
-    │   └── index.mjs                       # Guard Lambda (circuit breaker)
-    └── s3-notification-config/
-        └── index.mjs                       # Custom Resource Lambda (S3 notification config)
+    └── app-handler/
+        └── index.mjs                       # App Lambda (PUT /append, GET /read, circuit breaker)
 ```
 
 ## Key Design Decisions
@@ -364,13 +337,10 @@ The PUT /append endpoint accepts plain text in the request body (not JSON). The 
 If the S3 object doesn't exist, both endpoints return a 404 error. The object must be created manually before using the API.
 
 ### Circuit Breaker via Stage Deletion
-The security mechanism uses a destructive action (deleting the API stage) to ensure write frequency limits are enforced. This requires manual intervention to recover, providing a strong deterrent against rapid writes.
+The circuit breaker uses a destructive action (deleting the API stage) to ensure write frequency limits are enforced. The App Lambda checks the S3 object's built-in `LastModified` timestamp before each write, eliminating the need for custom metadata. This requires manual intervention to recover, providing a strong deterrent against rapid writes.
 
-### Cross-Stack References
-The Security Stack receives the S3 bucket and HTTP API objects from the App Stack via constructor props. CDK automatically generates CloudFormation exports/imports.
-
-### Custom Resource for S3 Notifications
-To avoid circular dependencies between stacks, the S3 event notification is configured using a CloudFormation Custom Resource. The Security Stack includes a Custom Resource Lambda (`lambda/s3-notification-config`) that uses the AWS SDK to configure S3 bucket notifications at deployment time. This approach allows the Security Stack to configure the App Stack's S3 bucket without directly modifying it in CloudFormation, preventing the circular dependency that would occur with the standard `addEventNotification()` method.
+### Single-Stack Architecture
+The system uses a single CDK stack with the circuit breaker logic integrated directly into the App Lambda. This simplifies deployment and eliminates the complexity of cross-stack references and S3 event notifications that were required in the previous two-stack design.
 
 ## Troubleshooting
 
@@ -434,42 +404,15 @@ cdk deploy TextAppendAppStack
 
 **Solution:** See "Recovery Procedure" section above.
 
-### Problem: Cross-Stack Reference Errors During Deployment
-
-**Cause:** Stacks deployed out of order or dependency missing.
-
-**Solution:**
-1. Ensure App Stack is deployed first
-2. Check that `securityStack.addDependency(appStack)` is in bin/ispeed.js
-3. Deploy both stacks:
-   ```bash
-   cdk deploy --all
-   ```
-
-### Problem: Guard Lambda Not Triggering
-
-**Cause:** S3 event notification not configured properly.
-
-**Solution:** Verify notification:
-```bash
-aws s3api get-bucket-notification-configuration --bucket ${S3_BUCKET_NAME}
-```
-
-If missing, redeploy Security Stack:
-```bash
-cdk deploy TextAppendSecurityStack
-```
-
 ## CloudWatch Logs
 
-All Lambda functions log to CloudWatch:
+The App Lambda logs to CloudWatch with a 10-day retention policy:
 
 - **App Lambda:** `/aws/lambda/TextAppendAppStack-AppLambda[...]`
-- **Guard Lambda:** `/aws/lambda/TextAppendSecurityStack-GuardLambda[...]`
 
 View logs in real-time:
 ```bash
-aws logs tail /aws/lambda/[FunctionName] --follow
+aws logs tail /aws/lambda/TextAppendAppStack-AppLambda* --follow
 ```
 
 ## Cleanup
@@ -513,7 +456,6 @@ aws s3 rb s3://${S3_BUCKET_NAME}
 
 - Add API Key authentication
 - Implement rate limiting via API Gateway usage plans
-- Enable S3 versioning for rollback capability
 - Add CloudWatch alarms for circuit breaker activation
 - Implement automatic stage recreation after cooldown period
 - Add size limits on appended text
