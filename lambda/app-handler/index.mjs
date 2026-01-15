@@ -8,18 +8,45 @@ import {
   ApiGatewayV2Client,
   DeleteStageCommand,
 } from "@aws-sdk/client-apigatewayv2";
+import {
+  SSMClient,
+  GetParameterCommand,
+} from "@aws-sdk/client-ssm";
 
 const s3Client = new S3Client({ region: process.env.AWS_REGION });
 const apiGatewayClient = new ApiGatewayV2Client({
   region: process.env.AWS_REGION,
 });
+const ssmClient = new SSMClient({ region: process.env.AWS_REGION });
 
 const BUCKET_NAME = process.env.BUCKET_NAME;
 const OBJECT_KEY = process.env.OBJECT_KEY;
 const API_ID = process.env.API_ID;
 const STAGE_NAME = process.env.STAGE_NAME;
+const THRESHOLD_PARAMETER_NAME = process.env.THRESHOLD_PARAMETER_NAME;
 
-const THRESHOLD_MINUTES = 1;
+async function getThresholdMinutes() {
+  try {
+    const response = await ssmClient.send(
+      new GetParameterCommand({ Name: THRESHOLD_PARAMETER_NAME })
+    );
+
+    const value = parseFloat(response.Parameter.Value);
+
+    if (isNaN(value) || value <= 0) {
+      console.error(`Invalid threshold value: ${response.Parameter.Value}, using default: 1`);
+      return 1;
+    }
+
+    console.log(`Threshold loaded from Parameter Store: ${value} minutes`);
+    return value;
+
+  } catch (error) {
+    console.error('Failed to fetch threshold from Parameter Store:', error);
+    console.warn('Using default: 1');
+    return 1; // Safe default
+  }
+}
 
 export const handler = async (event) => {
   console.log("Event:", JSON.stringify(event, null, 2));
@@ -51,6 +78,9 @@ export const handler = async (event) => {
 };
 
 async function handleAppend(event) {
+  // Fetch threshold value at runtime
+  const THRESHOLD_MINUTES = await getThresholdMinutes();
+
   // 1. Extract plain text body
   const textToAppend = event.body || "";
 
